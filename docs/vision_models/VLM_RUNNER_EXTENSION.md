@@ -126,11 +126,45 @@ so pre-staged mmproj blobs skip download. Not required for correctness (falls ba
 
 ---
 
+## 3.6 M0 feasibility result (Modal smoke test, 2026-07-11)
+
+Ran mainline llama.cpp (`mtmd`) on Modal CPU against our **exact pinned GGUFs**,
+feeding the COCO val2017 two-cats image (`000000039769.jpg`) with the prompt
+*"How many cats are in this image? Answer with a single digit only."*
+
+| Model | Answer | Correct | Wall time | Image-encode time |
+|-------|:------:|:-------:|:---------:|:-----------------:|
+| SmolVLM-256M (Q8_0 + mmproj) | `2.` | ✅ | 2.1 s | 1.4 s |
+| Qwen3-VL-2B (Q8_0 + mmproj) | `2` | ✅ | 19.5 s | 6.1 s |
+
+**Verdict: the concept is feasible.** The pinned LLM+mmproj pairs load, the image
+is encoded through the vision projector (`encoding mtmd batch` → `mtmd batch
+encoding done in N ms` in the logs), and both models return the correct vision
+answer. The `--mmproj` + base64/`--image` multimodal contract works exactly as the
+plan assumes.
+
+Findings that feed the design:
+- The `mtmd` build compiles `qwen3vl.cpp` **and** `siglip.cpp` — the exact vision
+  backends SmolVLM (SigLIP/Idefics3) and Qwen3-VL need exist in llama.cpp today.
+- **Qwen3-VL grounding note:** llama.cpp warns *"Qwen-VL models require at minimum
+  1024 image tokens"* and suggests `--image-min-tokens 1024`. Add this to the
+  Qwen3-VL vision config for accurate grounding.
+- Image-encode time (1.4 s / 6.1 s on CPU) is the natural analogue of the board's
+  "kernel wait time" vision metric — worth capturing in the score JSON.
+
+**What this does NOT prove:** Modal has no ET-SoC1, so this ran on CPU. Whether the
+`GGML_ET` backend implements the CLIP/SigLIP/qwen3vl vision ops is still the open
+board question — but it is now the *only* remaining unknown, and the model-side risk
+is retired. M0's remaining step is the same smoke test on the board/ET build.
+
+_Reproduce: `python -m modal run _vlm_smoke_modal.py` (script kept out of the repo;
+see PR description / attach on request)._
+
 ## 4. Milestones
 
 | # | Milestone | Deliverable | Depends on |
 |---|-----------|-------------|-----------|
-| M0 | **Confirm ET vision support** | Notes: does the pinned ET `llama-server` build include `libmtmd`? Do CLIP/vision ops run on `GGML_ET`? Exact `--mmproj` flag + HTTP image contract | submodule / Modal smoke test |
+| M0 | **Confirm vision support** | ✅ **Model-side proven** (§3.6 Modal smoke test): pinned GGUFs work as VLMs, correct answers. Remaining: run the same test on the ET build to confirm `GGML_ET` CLIP/vision ops | Modal (done) / board (pending) |
 | M1 | **Config schema** | `mmproj_artifact` + `vision` block documented; one model JSON updated (SmolVLM-256M, smallest) | M0 |
 | M2 | **Runner: load mmproj** | Runner materializes + passes `--mmproj`; server loads projector; text path unchanged | M1 |
 | M3 | **Runner: vision request+score** | Base64 image → chat API; `expect_substring` scoring; score JSON carries vision result | M2 |
@@ -148,7 +182,7 @@ per-model config PRs that can reuse the existing branches or new ones.
 
 | Risk / question | Impact | Mitigation |
 |-----------------|--------|-----------|
-| **ET backend may not implement CLIP/vision ops** (`GGML_ET`) | High — vision could fall back to CPU or fail | M0 Modal/board smoke test before any config rollout; if CPU-only, still valid but note kernel-wait metric |
+| **ET backend may not implement CLIP/vision ops** (`GGML_ET`) | High — vision could fall back to CPU or fail | **Model-side retired** — §3.6 proves the GGUFs + mtmd path work on CPU. Only ET-kernel coverage remains; confirm with board smoke test before rollout |
 | Exact `--mmproj` flag / HTTP image contract differs on pinned ET revision | Med | M0 verifies against `13da971…` `et` branch build; adjust flag/endpoint |
 | Runner is a **protected file** | Process | Land runner change as a maintainer PR on `main`; participant model PRs only touch config/artifacts |
 | No config schema → typos silently ignored | Low/Med | Add a light `ci_preflight.sh` check that if `mmproj_artifact`/`vision.image_artifact` are set, the keys exist in `artifacts.json` |
